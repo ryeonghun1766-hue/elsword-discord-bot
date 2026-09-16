@@ -5,6 +5,8 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, ViewportSize
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 # 1. 봇 설정
 TOKEN = os.getenv('DISCORD_TOKEN')
 TARGET_CHANNEL_ID = 1460907216415621292  # 본인의 디스코드 채널 ID
@@ -116,6 +118,34 @@ async def notice_checker():
 @notice_checker.before_loop
 async def before_notice_checker():
     await bot.wait_until_ready()
+
+# Render Web Service용 간단한 HTTP 서버
+class HealthHandler(BaseHTTPRequestHandler):
+    # noinspection PyPep8Naming
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Elsword Bot is running!")
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler  # type: ignore[arg-type]
+    )
+
+    print(f"[웹 서버] Render 포트 {port}에서 실행 중")
+    server.serve_forever()
+
+
+Thread(
+    target=run_health_server,
+    daemon=True
+).start()
+
 
 if TOKEN is None:
     raise ValueError("DISCORD_TOKEN 환경 변수가 설정되지 않았습니다.")
