@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, ViewportSize
 
 # 1. 봇 설정
-TOKEN = 'MTU0OTc3MjUxMDE5MzY0NzY3Ng.GO5q4N.e094suehI1cHwhwctfqhgZXJbgfoNB9ogLml1M'
+TOKEN = os.getenv('DISCORD_TOKEN')
 TARGET_CHANNEL_ID = 1460907216415621292  # 본인의 디스코드 채널 ID
 
 # 2. Intents 설정 (type: ignore 구문으로 PyCharm 경고 무시 처리)
@@ -117,5 +117,7 @@ async def notice_checker():
 async def before_notice_checker():
     await bot.wait_until_ready()
 
+if TOKEN is None:
+    raise ValueError("DISCORD_TOKEN 환경 변수가 설정되지 않았습니다.")
 
 bot.run(TOKEN)
