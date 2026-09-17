@@ -503,5 +503,6 @@ if TOKEN is None:
         "설정되지 않았습니다."
     )
 
+print("★★★★★ 최신 코드 실행 확인 ★★★★★")
 
 bot.run(TOKEN)
