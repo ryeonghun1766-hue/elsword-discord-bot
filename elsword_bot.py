@@ -1,38 +1,38 @@
 import os
+from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import cast
+
 import discord
-from discord.ext import tasks, commands
 import requests
 from bs4 import BeautifulSoup
+from discord.ext import tasks, commands
 
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    async_playwright,
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+    ViewportSize,
+)
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
 
-
-# =========================================================
-# 1. 기본 설정
-# =========================================================
+# ============================================================
+# 1. 봇 설정
+# ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 TARGET_CHANNEL_ID = 1460907216415621292
 
-NOTICE_LIST_URL = "https://elsword.nexon.com/News/Notice/List"
-NOTICE_BASE_URL = "https://elsword.nexon.com"
 
-
-# =========================================================
+# ============================================================
 # 2. Discord 설정
-# =========================================================
+# ============================================================
 
 intents = discord.Intents.default()
 
-setattr(
-    intents,
-    "message_content",
-    True
-)
+# PyCharm 타입 검사 우회
+setattr(intents, "message_content", True)
 
 bot = commands.Bot(
     command_prefix="!",
@@ -40,40 +40,40 @@ bot = commands.Bot(
 )
 
 
-# =========================================================
+# ============================================================
 # 3. 공지 기억
-# =========================================================
+# ============================================================
 
-seen_notice_urls = set()
+seen_notice_urls: set[str] = set()
 
 notice_checker_initialized = False
 
 
-# =========================================================
+# ============================================================
 # 4. 엘소드 공지 목록 가져오기
-# =========================================================
+# ============================================================
 
-def get_latest_notices():
+def get_latest_notices() -> list[tuple[str, str]]:
     """
-    엘소드 공식 홈페이지의 최신 공지 목록을 가져옵니다.
+    엘소드 공식 홈페이지의 공지 목록을 가져옵니다.
     """
+
+    url = "https://elsword.nexon.com/News/Notice/List"
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         )
     }
 
-    notices = []
+    notices: list[tuple[str, str]] = []
 
     try:
 
         response = requests.get(
-            NOTICE_LIST_URL,
+            url,
             headers=headers,
             timeout=15
         )
@@ -85,6 +85,7 @@ def get_latest_notices():
             "html.parser"
         )
 
+        # 공지 게시물 링크 찾기
         links = soup.select(
             'a[href*="/News/Notice/View"]'
         )
@@ -103,16 +104,20 @@ def get_latest_notices():
 
             href = str(href)
 
-            # ---------------------------------------------
-            # 상대주소 → 절대주소
-            # ---------------------------------------------
+            # --------------------------------------------
+            # 상대 주소
+            # --------------------------------------------
 
             if href.startswith("/"):
 
                 link = (
-                    NOTICE_BASE_URL
+                    "https://elsword.nexon.com"
                     + href
                 )
+
+            # --------------------------------------------
+            # 절대 주소
+            # --------------------------------------------
 
             elif href.startswith("http"):
 
@@ -122,17 +127,17 @@ def get_latest_notices():
 
                 continue
 
-            # ---------------------------------------------
+            # --------------------------------------------
             # 제목 가져오기
-            # ---------------------------------------------
+            # --------------------------------------------
 
-            title_element = item.select_one(
+            title_elem = item.select_one(
                 ".title"
             )
 
-            if title_element:
+            if title_elem:
 
-                title = title_element.get_text(
+                title = title_elem.get_text(
                     " ",
                     strip=True
                 )
@@ -147,22 +152,20 @@ def get_latest_notices():
             if not title:
                 continue
 
-            # ---------------------------------------------
+            # --------------------------------------------
             # 같은 링크 중복 제거
-            # ---------------------------------------------
+            # --------------------------------------------
 
-            if any(
+            already_exists = any(
                 existing_link == link
                 for _, existing_link in notices
-            ):
+            )
 
+            if already_exists:
                 continue
 
             notices.append(
-                (
-                    title,
-                    link
-                )
+                (title, link)
             )
 
             print(
@@ -173,11 +176,6 @@ def get_latest_notices():
                 f"            {link}"
             )
 
-            # 최신 공지 10개까지만 사용
-            if len(notices) >= 10:
-
-                break
-
         print(
             f"[공지 확인] 최종 "
             f"{len(notices)}개 공지 확인"
@@ -185,17 +183,15 @@ def get_latest_notices():
 
         return notices
 
-    # requests 관련 오류
     except requests.RequestException as error:
 
         print(
-            f"[크롤링 에러] "
-            f"웹사이트 요청 실패: {error}"
+            f"[크롤링 에러] 홈페이지 요청 실패: "
+            f"{error}"
         )
 
         return []
 
-    # HTML 처리 관련 오류
     except (
         UnicodeDecodeError,
         AttributeError,
@@ -204,178 +200,425 @@ def get_latest_notices():
     ) as error:
 
         print(
-            f"[크롤링 에러] "
-            f"HTML 처리 실패: {error}"
+            f"[크롤링 에러] HTML 처리 실패: "
+            f"{error}"
         )
 
         return []
 
 
-# =========================================================
+# ============================================================
 # 5. 공지 페이지 캡처
-# =========================================================
+# ============================================================
 
 async def capture_notice_page(
     url: str,
     output_path: str = "notice_temp.png"
-):
-    """엘소드 공지 본문 영역만 캡처"""
+) -> str | None:
+    """
+    엘소드 공지 페이지에서 공지 내용 영역만 캡처합니다.
+
+    공지 영역을 찾지 못하면
+    홈페이지 전체를 캡처하지 않습니다.
+    """
+
+    print(
+        f"[캡처] 공지 페이지 접속: {url}"
+    )
 
     try:
-        print(f"[캡처] 페이지 접속: {url}")
 
-        async with async_playwright() as p:
+        async with async_playwright() as playwright:
 
-            browser = await p.chromium.launch(
+            # ------------------------------------------------
+            # Chromium 실행
+            # ------------------------------------------------
+
+            browser = await playwright.chromium.launch(
                 headless=True
             )
 
-            # viewport 설정을 아예 생략
-            # PyCharm의 ViewportSize 타입 경고 방지
-            page = await browser.new_page()
+            try:
 
-            await page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=30000
-            )
+                # ------------------------------------------------
+                # 화면 크기
+                # ------------------------------------------------
 
-            # 페이지가 로딩될 시간을 조금 줌
-            await page.wait_for_timeout(3000)
-
-            # --------------------------------------
-            # 엘소드 공지 본문 영역 찾기
-            # --------------------------------------
-
-            selectors = [
-                ".view_cont",
-                ".view-cont",
-                ".notice_view",
-                ".noticeView",
-                ".board_view",
-                ".boardView",
-                ".view_content",
-                ".viewContent"
-            ]
-
-            notice_element = None
-
-            for selector in selectors:
-
-                try:
-                    element = await page.query_selector(
-                        selector
-                    )
-
-                    if element is None:
-                        continue
-
-                    box = await element.bounding_box()
-
-                    if box is None:
-                        continue
-
-                    if (
-                        box["width"] > 300
-                        and box["height"] > 100
-                    ):
-                        notice_element = element
-
-                        print(
-                            f"[캡처] 공지 본문 발견: "
-                            f"{selector}"
-                        )
-
-                        break
-
-                except Exception as e:
-                    print(
-                        f"[캡처] 선택자 확인 실패 "
-                        f"{selector}: {e}"
-                    )
-                    continue
-
-            # --------------------------------------
-            # 공지 본문을 못 찾았으면
-            # 전체 페이지 캡처하지 않음
-            # --------------------------------------
-
-            if notice_element is None:
-
-                print(
-                    "[캡처 실패] "
-                    "공지 본문 영역을 찾지 못했습니다."
+                viewport_setting = cast(
+                    ViewportSize,
+                    {
+                        "width": 1600,
+                        "height": 1000
+                    }
                 )
 
-                await browser.close()
+                context = await browser.new_context(
+                    viewport=viewport_setting,
+                    device_scale_factor=2
+                )
 
-                return None
+                try:
 
-            # --------------------------------------
-            # 공지 본문 캡처
-            # --------------------------------------
+                    page = await context.new_page()
 
-            print(
-                "[캡처] 공지 본문 캡처 시작"
-            )
+                    # ------------------------------------------------
+                    # 페이지 접속
+                    # ------------------------------------------------
 
-            await notice_element.screenshot(
-                path=output_path
-            )
+                    await page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=30000
+                    )
 
-            print(
-                f"[캡처 완료] {output_path}"
-            )
+                    print(
+                        "[캡처] 페이지 기본 로딩 완료"
+                    )
 
-            await browser.close()
+                    # 광고 / 이미지 / JS 로딩 대기
+                    await page.wait_for_timeout(3000)
 
-            return output_path
+                    # ------------------------------------------------
+                    # 공지 영역 후보
+                    # ------------------------------------------------
 
-    except Exception as e:
+                    selectors = [
+                        ".view_cont",
+                        ".view_conts",
+                        ".view_content",
+                        ".notice_view",
+                        ".noticeView",
+                        ".news_view",
+                        ".newsView",
+                        ".board_view",
+                        ".boardView"
+                    ]
+
+                    notice_element = None
+
+                    # ------------------------------------------------
+                    # 공지 영역 찾기
+                    # ------------------------------------------------
+
+                    for selector in selectors:
+
+                        try:
+
+                            locator = page.locator(
+                                selector
+                            ).first
+
+                            count = await locator.count()
+
+                            if count <= 0:
+                                continue
+
+                            if not await locator.is_visible():
+                                continue
+
+                            bounding_box = (
+                                await locator.bounding_box()
+                            )
+
+                            if bounding_box is None:
+                                continue
+
+                            width = bounding_box["width"]
+                            height = bounding_box["height"]
+
+                            # 너무 작은 영역은 제외
+                            if width < 200:
+                                continue
+
+                            if height < 100:
+                                continue
+
+                            notice_element = locator
+
+                            print(
+                                f"[캡처] 공지 영역 발견: "
+                                f"{selector}"
+                            )
+
+                            print(
+                                f"[캡처] 영역 크기: "
+                                f"{int(width)} x "
+                                f"{int(height)}"
+                            )
+
+                            break
+
+                        except PlaywrightError:
+                            continue
+
+                    # ------------------------------------------------
+                    # 공지 영역을 못 찾았을 경우
+                    # ------------------------------------------------
+
+                    if notice_element is None:
+
+                        print(
+                            "[캡처 실패] 공지 내용 영역을 "
+                            "찾지 못했습니다."
+                        )
+
+                        print(
+                            "[캡처] 전체 페이지 캡처는 "
+                            "실행하지 않습니다."
+                        )
+
+                        return None
+
+                    # ------------------------------------------------
+                    # 공지 영역으로 이동
+                    # ------------------------------------------------
+
+                    await notice_element.scroll_into_view_if_needed()
+
+                    await page.wait_for_timeout(1000)
+
+                    # ------------------------------------------------
+                    # 공지 영역만 캡처
+                    # ------------------------------------------------
+
+                    await notice_element.screenshot(
+                        path=output_path,
+                        animations="disabled"
+                    )
+
+                    print(
+                        f"[캡처 성공] {output_path}"
+                    )
+
+                    return output_path
+
+                finally:
+
+                    try:
+
+                        await context.close()
+
+                    except PlaywrightError as error:
+
+                        print(
+                            f"[캡처] 브라우저 context 종료 중 "
+                            f"오류: {error}"
+                        )
+
+            finally:
+
+                try:
+
+                    await browser.close()
+
+                except PlaywrightError as error:
+
+                    print(
+                        f"[캡처] 브라우저 종료 중 "
+                        f"오류: {error}"
+                    )
+
+    except PlaywrightTimeoutError as error:
 
         print(
-            f"[캡처 에러] "
-            f"{type(e).__name__}: {e}"
+            f"[캡처 에러] 페이지 로딩 시간 초과: "
+            f"{error}"
+        )
+
+        return None
+
+    except PlaywrightError as error:
+
+        print(
+            f"[캡처 에러] Playwright 오류: "
+            f"{error}"
+        )
+
+        return None
+
+    except OSError as error:
+
+        print(
+            f"[캡처 에러] 파일 처리 오류: "
+            f"{error}"
         )
 
         return None
 
 
-# =========================================================
-# 6. Discord 로그인 완료
-# =========================================================
+# ============================================================
+# 6. !testnotice 테스트 명령
+# ============================================================
+
+@bot.command(name="testnotice")
+async def test_notice(
+    ctx: commands.Context
+) -> None:
+
+    print(
+        "[테스트] !testnotice 실행"
+    )
+
+    # ------------------------------------------------
+    # 최신 공지 가져오기
+    # ------------------------------------------------
+
+    notices = get_latest_notices()
+
+    if not notices:
+
+        await ctx.send(
+            "❌ 테스트할 공지를 가져오지 못했습니다."
+        )
+
+        print(
+            "[테스트] 공지 목록 가져오기 실패"
+        )
+
+        return
+
+    title, link = notices[0]
+
+    print(
+        f"[테스트] 테스트 공지: {title}"
+    )
+
+    print(
+        f"[테스트] 테스트 링크: {link}"
+    )
+
+    # ------------------------------------------------
+    # 공지 캡처
+    # ------------------------------------------------
+
+    print(
+        "[테스트] 공지 페이지 캡처 시작"
+    )
+
+    image_path = await capture_notice_page(
+        link,
+        "notice_test.png"
+    )
+
+    print(
+        f"[테스트] 캡처 결과: {image_path}"
+    )
+
+    # ------------------------------------------------
+    # Discord Embed
+    # ------------------------------------------------
+
+    embed = discord.Embed(
+        title="🧪 테스트 - 엘소드 공지사항",
+        description=(
+            f"[{title}]({link})\n\n"
+            "테스트 전송입니다."
+        ),
+        color=discord.Color.green()
+    )
+
+    embed.set_footer(
+        text="엘소드 공식 홈페이지"
+    )
+
+    # ------------------------------------------------
+    # 이미지가 정상적으로 캡처된 경우
+    # ------------------------------------------------
+
+    if (
+        image_path
+        and os.path.exists(image_path)
+    ):
+
+        print(
+            "[테스트] 캡처 이미지 Discord 전송"
+        )
+
+        file = discord.File(
+            image_path,
+            filename="notice_test.png"
+        )
+
+        embed.set_image(
+            url="attachment://notice_test.png"
+        )
+
+        try:
+
+            await ctx.send(
+                embed=embed,
+                file=file
+            )
+
+            print(
+                "[테스트] Discord 전송 성공"
+            )
+
+        except discord.DiscordException as error:
+
+            print(
+                f"[테스트 전송 오류] {error}"
+            )
+
+        finally:
+
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
+
+    # ------------------------------------------------
+    # 이미지 캡처 실패
+    # ------------------------------------------------
+
+    else:
+
+        print(
+            "[테스트] 이미지 캡처 실패"
+        )
+
+        await ctx.send(
+            embed=embed
+        )
+
+
+# ============================================================
+# 7. Discord 로그인 완료
+# ============================================================
 
 @bot.event
 async def on_ready():
 
+    user = bot.user
+
     print(
-        "================================"
+        "=========================================="
     )
 
     print(
         "★★★★★ ON_READY 실행됨 ★★★★★"
     )
 
-    user = bot.user
-
     if user is not None:
 
         print(
-            f"봇 이름: {user.name}"
+            f"[디스코드] 봇 이름: {user.name}"
         )
 
         print(
-            f"봇 ID: {user.id}"
+            f"[디스코드] 봇 ID: {user.id}"
+        )
+
+    else:
+
+        print(
+            "[디스코드] 봇 정보를 가져오지 못했습니다."
         )
 
     print(
-        f"공지 검사 루프: "
+        f"[공지 확인] 공지 검사 루프: "
         f"{notice_checker.is_running()}"
     )
-
-    # ---------------------------------------------
-    # 공지 검사 시작
-    # ---------------------------------------------
 
     if not notice_checker.is_running():
 
@@ -388,17 +631,18 @@ async def on_ready():
     else:
 
         print(
-            "공지 검사 루프가 이미 실행 중입니다."
+            "[공지 확인] 검사 루프가 "
+            "이미 실행 중입니다."
         )
 
     print(
-        "================================"
+        "=========================================="
     )
 
 
-# =========================================================
-# 7. 공지 검사
-# =========================================================
+# ============================================================
+# 8. 공지 확인 루프
+# ============================================================
 
 @tasks.loop(minutes=5)
 async def notice_checker():
@@ -409,9 +653,9 @@ async def notice_checker():
         "[공지 확인] 5분 주기 검사 시작"
     )
 
-    # ---------------------------------------------
-    # Discord 채널 확인
-    # ---------------------------------------------
+    # ------------------------------------------------
+    # Discord 채널 찾기
+    # ------------------------------------------------
 
     channel = bot.get_channel(
         TARGET_CHANNEL_ID
@@ -419,10 +663,7 @@ async def notice_checker():
 
     if not isinstance(
         channel,
-        (
-            discord.TextChannel,
-            discord.Thread
-        )
+        (discord.TextChannel, discord.Thread)
     ):
 
         print(
@@ -432,9 +673,9 @@ async def notice_checker():
 
         return
 
-    # ---------------------------------------------
+    # ------------------------------------------------
     # 공지 목록 가져오기
-    # ---------------------------------------------
+    # ------------------------------------------------
 
     notices = get_latest_notices()
 
@@ -447,9 +688,9 @@ async def notice_checker():
 
         return
 
-    # ---------------------------------------------
+    # ------------------------------------------------
     # 최초 실행
-    # ---------------------------------------------
+    # ------------------------------------------------
 
     if not notice_checker_initialized:
 
@@ -461,33 +702,30 @@ async def notice_checker():
         notice_checker_initialized = True
 
         print(
-            "[공지 확인] 초기화 완료 - "
+            f"[공지 확인] 초기화 완료 - "
             f"{len(seen_notice_urls)}개의 "
-            "기존 공지를 기억했습니다."
+            f"기존 공지를 기억했습니다."
         )
 
         return
 
-    # ---------------------------------------------
+    # ------------------------------------------------
     # 새로운 공지 찾기
-    # ---------------------------------------------
+    # ------------------------------------------------
 
-    new_notices = []
+    new_notices: list[tuple[str, str]] = []
 
     for title, link in notices:
 
         if link not in seen_notice_urls:
 
             new_notices.append(
-                (
-                    title,
-                    link
-                )
+                (title, link)
             )
 
-    # ---------------------------------------------
-    # 새 공지가 없음
-    # ---------------------------------------------
+    # ------------------------------------------------
+    # 새로운 공지가 없으면 종료
+    # ------------------------------------------------
 
     if not new_notices:
 
@@ -502,43 +740,44 @@ async def notice_checker():
         f"{len(new_notices)}개 발견!"
     )
 
-    # ---------------------------------------------
+    # ------------------------------------------------
     # 오래된 공지부터 전송
-    # ---------------------------------------------
+    # ------------------------------------------------
 
     for title, link in reversed(
         new_notices
     ):
 
         print(
+            "------------------------------------------"
+        )
+
+        print(
             f"[공지 전송] {title}"
         )
 
-        screenshot_file = (
-            "notice_temp.png"
+        print(
+            f"[공지 전송] {link}"
         )
 
-        # ---------------------------------------------
+        # ------------------------------------------------
         # 공지 캡처
-        # ---------------------------------------------
+        # ------------------------------------------------
 
         image_path = await capture_notice_page(
             link,
-            screenshot_file
+            "notice_temp.png"
         )
 
-        # ---------------------------------------------
+        # ------------------------------------------------
         # Embed 생성
-        # ---------------------------------------------
+        # ------------------------------------------------
 
         embed = discord.Embed(
-
             title="📢 엘소드 새로운 공지사항",
-
             description=(
                 f"[{title}]({link})"
             ),
-
             color=discord.Color.blue()
         )
 
@@ -546,14 +785,18 @@ async def notice_checker():
             text="엘소드 공식 홈페이지"
         )
 
-        # ---------------------------------------------
-        # 이미지 캡처 성공
-        # ---------------------------------------------
+        # ------------------------------------------------
+        # 이미지가 있는 경우
+        # ------------------------------------------------
 
         if (
             image_path
             and os.path.exists(image_path)
         ):
+
+            print(
+                "[공지 전송] 공지 영역 이미지 첨부"
+            )
 
             file = discord.File(
                 image_path,
@@ -572,37 +815,39 @@ async def notice_checker():
                 )
 
                 print(
-                    "[공지 전송] "
-                    "Discord 이미지 전송 성공"
+                    "[공지 전송] Discord 전송 성공"
                 )
 
-            except discord.HTTPException as error:
+            except discord.DiscordException as error:
 
                 print(
-                    f"[Discord 전송 에러] "
-                    f"{error}"
+                    f"[Discord 전송 오류] {error}"
                 )
 
-            # 임시 이미지 삭제
-            try:
+                # 전송 실패했으므로
+                # seen에 넣지 않음
+                continue
 
-                os.remove(
-                    image_path
-                )
+            finally:
 
-            except OSError:
+                try:
+                    os.remove(image_path)
+                except OSError:
+                    pass
 
-                pass
-
-        # ---------------------------------------------
+        # ------------------------------------------------
         # 이미지 캡처 실패
-        # ---------------------------------------------
+        # ------------------------------------------------
 
         else:
 
             print(
-                "[공지 전송] "
-                "캡처 실패 → 텍스트 공지만 전송"
+                "[공지 전송] 공지 영역 캡처 실패"
+            )
+
+            print(
+                "[공지 전송] 이미지 없이 "
+                "공지 링크만 전송합니다."
             )
 
             try:
@@ -611,25 +856,34 @@ async def notice_checker():
                     embed=embed
                 )
 
-            except discord.HTTPException as error:
-
                 print(
-                    f"[Discord 전송 에러] "
-                    f"{error}"
+                    "[공지 전송] Discord 전송 성공"
                 )
 
-        # ---------------------------------------------
-        # 공지 기억
-        # ---------------------------------------------
+            except discord.DiscordException as error:
+
+                print(
+                    f"[Discord 전송 오류] {error}"
+                )
+
+                continue
+
+        # ------------------------------------------------
+        # 정상적으로 Discord 전송된 공지만 기억
+        # ------------------------------------------------
 
         seen_notice_urls.add(
             link
         )
 
+        print(
+            f"[공지 기억] {link}"
+        )
 
-# =========================================================
-# 8. 공지 검사 시작 전 대기
-# =========================================================
+
+# ============================================================
+# 9. 공지 검사 시작 전 대기
+# ============================================================
 
 @notice_checker.before_loop
 async def before_notice_checker():
@@ -637,190 +891,16 @@ async def before_notice_checker():
     await bot.wait_until_ready()
 
 
-# =========================================================
-# 9. !testnotice 명령어
-# =========================================================
+# ============================================================
+# 10. Render Web Service HTTP 서버
+# ============================================================
 
-@bot.command(
-    name="testnotice"
-)
-async def test_notice_command(ctx):
-    """
-    !testnotice
-
-    최신 공지 하나를 가져와서
-    공지 본문만 캡처하여 Discord에 전송합니다.
-    """
-
-    print(
-        "[테스트] !testnotice 실행"
-    )
-
-    # ---------------------------------------------
-    # 채널 확인
-    # ---------------------------------------------
-
-    if not isinstance(
-        ctx.channel,
-        (
-            discord.TextChannel,
-            discord.Thread
-        )
-    ):
-
-        await ctx.send(
-            "❌ 이 명령어를 사용할 수 없는 채널입니다."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # 공지 목록 가져오기
-    # ---------------------------------------------
-
-    notices = get_latest_notices()
-
-    if not notices:
-
-        await ctx.send(
-            "❌ 엘소드 공지 목록을 가져오지 못했습니다."
-        )
-
-        return
-
-    # 가장 최신 공지
-    title, link = notices[0]
-
-    print(
-        f"[테스트] 테스트 공지: {title}"
-    )
-
-    # ---------------------------------------------
-    # 공지 캡처
-    # ---------------------------------------------
-
-    print(
-        "[테스트] 공지 페이지 캡처 시작"
-    )
-
-    screenshot_file = (
-        "test_notice_temp.png"
-    )
-
-    image_path = await capture_notice_page(
-        link,
-        screenshot_file
-    )
-
-    # ---------------------------------------------
-    # Embed
-    # ---------------------------------------------
-
-    embed = discord.Embed(
-
-        title="🧪 테스트 - 엘소드 공지사항",
-
-        description=(
-            f"[{title}]({link})"
-        ),
-
-        color=discord.Color.green()
-    )
-
-    embed.set_footer(
-        text="테스트 전송입니다."
-    )
-
-    # ---------------------------------------------
-    # 캡처 성공
-    # ---------------------------------------------
-
-    if (
-        image_path
-        and os.path.exists(image_path)
-    ):
-
-        file = discord.File(
-            image_path,
-            filename="test_notice.png"
-        )
-
-        embed.set_image(
-            url="attachment://test_notice.png"
-        )
-
-        try:
-
-            await ctx.send(
-                embed=embed,
-                file=file
-            )
-
-            print(
-                "[테스트] 이미지 전송 성공"
-            )
-
-        except discord.HTTPException as error:
-
-            print(
-                f"[테스트 Discord 전송 에러] "
-                f"{error}"
-            )
-
-        # 임시파일 삭제
-        try:
-
-            os.remove(
-                image_path
-            )
-
-        except OSError:
-
-            pass
-
-    # ---------------------------------------------
-    # 캡처 실패
-    # ---------------------------------------------
-
-    else:
-
-        embed.description = (
-            f"[{title}]({link})\n\n"
-            "⚠️ 공지 본문 캡처에 실패했습니다."
-        )
-
-        try:
-
-            await ctx.send(
-                embed=embed
-            )
-
-        except discord.HTTPException as error:
-
-            print(
-                f"[테스트 Discord 전송 에러] "
-                f"{error}"
-            )
-
-        print(
-            "[테스트] 이미지 캡처 실패"
-        )
-
-
-# =========================================================
-# 10. Render Web Service용 HTTP 서버
-# =========================================================
-
-class HealthHandler(
-    BaseHTTPRequestHandler
-):
+class HealthHandler(BaseHTTPRequestHandler):
 
     # noinspection PyPep8Naming
     def do_GET(self):
 
-        self.send_response(
-            200
-        )
+        self.send_response(200)
 
         self.send_header(
             "Content-Type",
@@ -836,9 +916,7 @@ class HealthHandler(
     # noinspection PyPep8Naming
     def do_HEAD(self):
 
-        self.send_response(
-            200
-        )
+        self.send_response(200)
 
         self.send_header(
             "Content-Type",
@@ -847,10 +925,6 @@ class HealthHandler(
 
         self.end_headers()
 
-
-# =========================================================
-# 11. Render 서버 실행
-# =========================================================
 
 def run_health_server():
 
@@ -861,9 +935,15 @@ def run_health_server():
         )
     )
 
+    # PyCharm 타입 검사 해결
+    handler_type = cast(
+        type[BaseHTTPRequestHandler],
+        HealthHandler
+    )
+
     server = HTTPServer(
         ("0.0.0.0", port),
-        HealthHandler  # type: ignore[arg-type]
+        handler_type  # type: ignore[arg-type]
     )
 
     print(
@@ -874,15 +954,21 @@ def run_health_server():
     server.serve_forever()
 
 
-Thread(
+# ============================================================
+# 11. Render HTTP 서버 시작
+# ============================================================
+
+health_thread = Thread(
     target=run_health_server,
     daemon=True
-).start()
+)
+
+health_thread.start()
 
 
-# =========================================================
-# 12. TOKEN 확인
-# =========================================================
+# ============================================================
+# 12. Discord 봇 실행
+# ============================================================
 
 if TOKEN is None:
 
@@ -892,14 +978,4 @@ if TOKEN is None:
     )
 
 
-# =========================================================
-# 13. 봇 실행
-# =========================================================
-
-print(
-    "[봇] Discord 로그인 시작..."
-)
-
-bot.run(
-    TOKEN
-)
+bot.run(TOKEN)
