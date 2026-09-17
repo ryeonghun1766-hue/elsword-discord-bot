@@ -414,13 +414,86 @@ async def notice_checker():
 
 
 # ==========================================
-# 8. 봇 시작 전 대기
+# 8. 테스트 공지 전송 명령어
 # ==========================================
 
-@notice_checker.before_loop
-async def before_notice_checker():
+@bot.command(name="testnotice")
+async def test_notice(ctx):
+    """!testnotice 입력 시 최신 공지를 테스트로 전송"""
 
-    await bot.wait_until_ready()
+    print("[테스트] !testnotice 명령어 실행됨")
+
+    # 지정된 공지 채널에서만 작동
+    if ctx.channel.id != TARGET_CHANNEL_ID:
+        await ctx.send(
+            "❌ 이 명령어는 공지 채널에서만 사용할 수 있습니다."
+        )
+        return
+
+    notices = get_latest_notices()
+
+    if not notices:
+        await ctx.send(
+            "❌ 엘소드 공지 목록을 가져오지 못했습니다."
+        )
+        print("[테스트] 공지 목록 가져오기 실패")
+        return
+
+    # 최신 공지 1개
+    title, link = notices[0]
+
+    print(f"[테스트] 테스트 공지: {title}")
+    print(f"[테스트] 링크: {link}")
+
+    # 공지 페이지 캡처
+    screenshot_file = "test_notice_temp.png"
+
+    img_path = await capture_notice_page(
+        link,
+        screenshot_file
+    )
+
+    # Embed 생성
+    embed = discord.Embed(
+        title="🧪 테스트 - 엘소드 공지사항",
+        description=f"[{title}]({link})",
+        color=discord.Color.green()
+    )
+
+    embed.set_footer(
+        text="테스트 전송입니다."
+    )
+
+    # 스크린샷이 있는 경우
+    if img_path and os.path.exists(img_path):
+
+        file = discord.File(
+            img_path,
+            filename="test_notice.png"
+        )
+
+        embed.set_image(
+            url="attachment://test_notice.png"
+        )
+
+        await ctx.send(
+            embed=embed,
+            file=file
+        )
+
+        try:
+            os.remove(img_path)
+        except OSError:
+            pass
+
+    # 스크린샷이 없는 경우
+    else:
+
+        await ctx.send(
+            embed=embed
+        )
+
+    print("[테스트] 테스트 공지 전송 완료")
 
 
 # ==========================================
