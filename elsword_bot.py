@@ -161,11 +161,17 @@ async def capture_notice_page(
     """공지 페이지 캡처"""
 
     try:
+        print(f"[캡처] 페이지 접속: {url}")
 
         async with async_playwright() as p:
 
             browser = await p.chromium.launch(
-                headless=True
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
             )
 
             viewport_setting: ViewportSize = {
@@ -179,43 +185,59 @@ async def capture_notice_page(
 
             await page.goto(
                 url,
-                wait_until="networkidle",
-                timeout=30000
+                wait_until="domcontentloaded",
+                timeout=60000
             )
+
+            print("[캡처] 페이지 로딩 완료")
+
+            await page.wait_for_timeout(5000)
 
             element = await page.query_selector(
                 ".view_cont"
             )
 
             if element:
+                print("[캡처] .view_cont 발견")
 
                 await element.screenshot(
                     path=output_path
                 )
 
             else:
+                print(
+                    "[캡처] .view_cont를 찾지 못함"
+                )
+                print(
+                    "[캡처] 전체 페이지 캡처로 전환"
+                )
 
                 await page.screenshot(
                     path=output_path,
-                    full_page=False
+                    full_page=True
                 )
 
             await browser.close()
 
-            return output_path
+            if os.path.exists(output_path):
+                print(
+                    f"[캡처] 성공: {output_path}"
+                )
+                return output_path
+
+            print("[캡처] 파일 생성 실패")
+            return None
 
     except Exception as e:
 
         print(
-            f"[캡처 에러] {e}"
+            f"[캡처 에러] {type(e).__name__}: {e}"
         )
 
         return None
 
 
-# ==========================================
-# 6. Discord 봇 로그인
-# ==========================================
+
 
 # ==========================================
 # 6. Discord 봇 로그인
@@ -417,63 +439,46 @@ async def notice_checker():
 # 8. 테스트 공지 전송 명령어
 # ==========================================
 
-@bot.command(name="testnotice")
-async def test_notice(ctx):
-    """!testnotice 입력 시 최신 공지를 테스트로 전송"""
+@bot.command()
+async def testnotice(ctx):
+    """공지 캡처 및 Discord 전송 테스트"""
 
-    print("[테스트] !testnotice 명령어 실행됨")
+    print("[테스트] !testnotice 실행")
 
-    # 지정된 공지 채널에서만 작동
-    if ctx.channel.id != TARGET_CHANNEL_ID:
-        await ctx.send(
-            "❌ 이 명령어는 공지 채널에서만 사용할 수 있습니다."
-        )
-        return
+    test_url = "https://elsword.nexon.com/News/Notice/View?n4ArticleSN=150184"
+    test_title = "테스트 - 엘소드 공지사항"
 
-    notices = get_latest_notices()
+    screenshot_file = "test_notice.png"
 
-    if not notices:
-        await ctx.send(
-            "❌ 엘소드 공지 목록을 가져오지 못했습니다."
-        )
-        print("[테스트] 공지 목록 가져오기 실패")
-        return
-
-    # 최신 공지 1개
-    title, link = notices[0]
-
-    print(f"[테스트] 테스트 공지: {title}")
-    print(f"[테스트] 링크: {link}")
-
-    # 공지 페이지 캡처
-    screenshot_file = "test_notice_temp.png"
+    print("[테스트] 공지 페이지 캡처 시작")
 
     img_path = await capture_notice_page(
-        link,
+        test_url,
         screenshot_file
     )
 
-    # Embed 생성
+    print(f"[테스트] 캡처 결과: {img_path}")
+
     embed = discord.Embed(
         title="🧪 테스트 - 엘소드 공지사항",
-        description=f"[{title}]({link})",
+        description=f"[{test_title}]({test_url})",
         color=discord.Color.green()
     )
 
     embed.set_footer(
-        text="테스트 전송입니다."
+        text="엘소드 공지 봇 테스트 전송"
     )
 
-    # 스크린샷이 있는 경우
     if img_path and os.path.exists(img_path):
+        print("[테스트] 이미지 파일 확인됨")
 
         file = discord.File(
             img_path,
-            filename="test_notice.png"
+            filename="notice.png"
         )
 
         embed.set_image(
-            url="attachment://test_notice.png"
+            url="attachment://notice.png"
         )
 
         await ctx.send(
@@ -486,14 +491,14 @@ async def test_notice(ctx):
         except OSError:
             pass
 
-    # 스크린샷이 없는 경우
+        print("[테스트] 이미지 포함 전송 완료")
+
     else:
+        print("[테스트] 이미지 캡처 실패")
 
         await ctx.send(
             embed=embed
         )
-
-    print("[테스트] 테스트 공지 전송 완료")
 
 
 # ==========================================
