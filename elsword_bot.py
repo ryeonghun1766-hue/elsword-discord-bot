@@ -217,25 +217,22 @@ async def capture_notice_page(
 # 6. Discord 봇 로그인
 # ==========================================
 
+# ==========================================
+# 6. Discord 봇 로그인
+# ==========================================
+
 @bot.event
 async def on_ready():
-    user = bot.user
-
     print("================================")
-    print("[디스코드] on_ready 실행됨")
-
-    if user:
-        print(f"[디스코드] 로그인 성공: {user.name}")
-
-    print(f"[공지 확인] 현재 실행 상태: {notice_checker.is_running()}")
+    print("★★★★★ ON_READY 실행됨 ★★★★★")
+    print(f"봇 이름: {bot.user}")
+    print(f"봇 ID: {getattr(bot.user, 'id', '없음')}")
+    print(f"공지 검사 루프: {notice_checker.is_running()}")
+    print("================================")
 
     if not notice_checker.is_running():
-        print("[공지 확인] 검사 루프 시작!")
         notice_checker.start()
-    else:
-        print("[공지 확인] 검사 루프가 이미 실행 중입니다.")
-
-    print("================================")
+        print("★★★★★ 공지 검사 루프 START ★★★★★")
 
 
 # ==========================================
